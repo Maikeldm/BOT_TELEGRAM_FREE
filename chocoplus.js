@@ -2,14 +2,9 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import config from './config.js';
+import { config } from './config.js';
 import free from './lib/free.js';
-import {
-  getUser,
-  clearUserWhatsapp,
-  isActive,
-  addOrUpdateVip
-} from './lib/users.js';
+import { getUser, updateUserWhatsapp, clearUserWhatsapp, isActive, db } from './lib/users.js';
 
 // ESM: __dirname workaround
 const __filename = fileURLToPath(import.meta.url);
@@ -31,37 +26,22 @@ export default function(bot, dependencies) {
     const chatId = msg.chat.id;
     let user = await getUser(chatId);
 
-    let isVip = user && isActive(user);
-    let isFree = free.isFreeMode();
+    let messageText = '✅ Bienvenido a Zetas-Bot V4!';
+    let keyboard = [
+      [{ text: '📱 Conectar WhatsApp', callback_data: 'start_pairing' }],
+      [{ text: '🆘 Soporte', callback_data: 'soporte' }]
+    ];
 
-    let messageText;
-    let keyboard;
-
-    if (!isVip && !isFree) {
-        messageText = !user ? '⚠️ Necesitas ser VIP para usar el bot.' : '⛔ Tu acceso VIP ha expirado.';
-        keyboard = [
-          [{ text: '💎 Comprar Acceso VIP', callback_data: 'show_prices' }],
-          [{ text: '🆘 Soporte', callback_data: 'soporte' }]
-        ];
-    } else if (isVip || isFree) {
-        if (isFree && !isVip) free.addFreeUser(chatId);
-        if (user && user.whatsapp_number) {
-            messageText = '✅ Ya tienes WhatsApp conectado.';
-            keyboard = [
-                [{ text: '📜 Ver Menú', callback_data: 'show_menu' }],
-                [{ text: '❌ Desconectar WhatsApp', callback_data: 'disconnect_whatsapp' }],
-                [{ text: '🆘 Soporte', callback_data: 'soporte' }]
-            ];
-        } else {
-            messageText = isVip ? '✅ Eres usuario VIP activo.' : '✅ Eres usuario FREE temporal.';
-            keyboard = [
-              [{ text: '📱 Conectar WhatsApp', callback_data: 'start_pairing' }],
-              [{ text: '🆘 Soporte', callback_data: 'soporte' }]
-            ];
-        }
+    if (user?.whatsapp_number) {
+      messageText = '✅ Ya tienes WhatsApp conectado.';
+      keyboard = [
+        [{ text: '📜 Ver Menú', callback_data: 'show_menu' }],
+        [{ text: '❌ Desconectar WhatsApp', callback_data: 'disconnect_whatsapp' }],
+        [{ text: '🆘 Soporte', callback_data: 'soporte' }]
+      ];
     }
 
-    const welcomeMessage = await bot.sendMessage(chatId, `👋 ¡Bienvenido a Zetas-Bot V4!\n\n${messageText}`, {
+    const welcomeMessage = await bot.sendMessage(chatId, messageText, {
       reply_markup: { inline_keyboard: keyboard }
     });
     setTimeout(() => { try { bot.deleteMessage(chatId, welcomeMessage.message_id); } catch (e) {} }, 30000);
@@ -676,7 +656,4 @@ export default function(bot, dependencies) {
     texto += users.map(u => `• <b>ID:</b> <code>${u.telegram_id}</code> | <b>Expira:</b> ${u.expires ? u.expires.split('T')[0] : 'N/A'} | <b>WA:</b> ${u.whatsapp_number || 'No vinculado'}`).join('\n');
     await bot.sendMessage(chatId, texto, { parse_mode: 'HTML' });
   }
-
-  // Elimina los comandos antiguos de admin: /addvip, /notificar, /stats, /adminmenu, /descargar_usuarios
-  // ...existing code...
 }

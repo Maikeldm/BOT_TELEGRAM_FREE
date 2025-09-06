@@ -1,20 +1,24 @@
-// main.js: Telegram + Baileys multiusuario centralizado
-const TelegramBot = require('node-telegram-bot-api');
-const fs = require('fs');
-const path = require('path');
-const pino = require('pino');
-const simple = require('./lib/oke.js');
-const smsg = require('./lib/smsg');
-const { default: makeWASocket, Browsers, useMultiFileAuthState, DisconnectReason, makeInMemoryStore, jidDecode, proto, getContentType, downloadContentFromMessage } = require('baron-baileys-v2');
-const { 
+import TelegramBot from 'node-telegram-bot-api';
+import fs from 'fs';
+import path from 'path';
+import pino from 'pino';
+import simple from './lib/oke.js';
+import smsg from './lib/smsg.js'; // Agregar la extensión .js
+import { default as makeWASocket, Browsers, useMultiFileAuthState, DisconnectReason, makeInMemoryStore, jidDecode, proto, getContentType, downloadContentFromMessage } from 'baron-baileys-v2';
+import { 
   getUser, 
   updateUserWhatsapp, 
   clearUserWhatsapp, 
-  isActive, 
-  addOrUpdateVip, 
+  isActive,
   db 
-} = require('./lib/users');
-require('dotenv').config();
+} from './lib/users.js'; // Agregar la extensión .js
+import dotenv from 'dotenv';
+dotenv.config();
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const TOKEN = process.env.BOT_TOKEN || 'pon_tu_token_aqui'; // Usa .env
 const bot = new TelegramBot(TOKEN, { polling: true });
@@ -26,7 +30,26 @@ const userStates = {};
 
 // Cambiar la estructura de pairing: pairing/<telegram_id>/<numero>
 async function startSession(telegram_id, number) {
-  if (activeSessions[telegram_id]) return activeSessions[telegram_id];
+  // Verificar si ya existe una sesión activa para este usuario
+  if (activeSessions[telegram_id]) {
+    console.log(`Ya existe una sesión activa para ${telegram_id}`);
+    return activeSessions[telegram_id];
+  }
+
+  // Verificar si el número ya está siendo usado
+  const users = await new Promise((resolve) => {
+    db.all('SELECT * FROM users WHERE whatsapp_number != ""', [], (err, rows) => {
+      resolve(err ? [] : rows);
+    });
+  });
+
+  const existingUser = users.find(u => u.whatsapp_number === number && u.telegram_id !== telegram_id);
+  if (existingUser) {
+    console.log(`El número ${number} ya está en uso por otro usuario`);
+    await clearUserWhatsapp(existingUser.telegram_id);
+    delete activeSessions[existingUser.telegram_id];
+  }
+
   const sessionPath = path.join(__dirname, 'lib', 'pairing', String(telegram_id), number);
   const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
   const store = makeInMemoryStore({ logger: pino({ level: 'silent' }) });
@@ -34,7 +57,8 @@ async function startSession(telegram_id, number) {
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
     auth: state,
-    version: [2, 3000, 1017531287],
+    // Actualiza la versión para corregir el error de conexión
+    version: [2, 3000, 1023223821],
     browser: Browsers.ubuntu('Edge'),
     getMessage: async key => {
       const msg = await store.loadMessage(key.remoteJid, key.id);
@@ -99,14 +123,18 @@ async function startSession(telegram_id, number) {
     return text && (text.trim().startsWith('.') || text.trim().startsWith('/'));
   }
 
+  // En el evento messages.upsert
   conn.ev.on('messages.upsert', async chatUpdate => {
     try {
       const mek = chatUpdate.messages[0];
-      // Elimina el filtro para probar si responde en grupos
-      // if (!isCommandMessage(mek)) return;
-
+      if (!mek.message) return;
+      mek.message = (Object.keys(mek.message)[0] === 'ephemeralMessage') ? mek.message.ephemeralMessage.message : mek.message;
+      if (mek.key && mek.key.remoteJid === 'status@broadcast') return;
+      if (!conn.public && !mek.key.fromMe && chatUpdate.type === 'notify') return;
+      if (mek.key.id.startsWith('BAE5') && mek.key.id.length === 16) return;
       const m = smsg(conn, mek, store);
-      require("./bruxin.js")(conn, m, chatUpdate, store);
+      const bruxin = await import('./bruxin.js');
+      bruxin.default(conn, m, chatUpdate, store);
     } catch (err) {
       console.log(err);
     }
@@ -138,96 +166,48 @@ function defineBuyOptions(chatId) {
  return opts;
 };
 async function sendUserMenu(chatId) {
-  // Refresca el usuario desde la base de datos para obtener el estado REAL
-  const currentUser = await getUser(chatId);
-  if (!currentUser || !isActive(currentUser)) {
-    try {
-      await bot.sendMessage(chatId, '⛔ No tienes acceso VIP activo.', defineBuyOptions(chatId));
-    } catch (e) {}
-    return;
-  }
-  // Verifica si la sesión realmente existe en disco, si no, limpia el campo whatsapp_number
-  let whatsappConnected = false;
-  if (currentUser.whatsapp_number) {
-    const pairingDir = path.join(__dirname, 'lib', 'pairing', String(chatId), currentUser.whatsapp_number);
-    const credsPath = path.join(pairingDir, 'creds.json');
-    if (fs.existsSync(pairingDir) && fs.existsSync(credsPath)) {
-      whatsappConnected = true;
+  try {
+    let whatsappConnected = false;
+    if (userStates[chatId]?.whatsapp_number) {
+      const pairingDir = path.join(__dirname, 'lib', 'pairing', String(chatId), userStates[chatId].whatsapp_number);
+      const credsPath = path.join(pairingDir, 'creds.json');
+      if (fs.existsSync(pairingDir) && fs.existsSync(credsPath)) {
+        whatsappConnected = true;
+      }
+    }
+
+    let extraButtons = [];
+    if (!whatsappConnected) {
+      extraButtons.push([{ text: '📱 Conectar WhatsApp', callback_data: 'start_pairing' }]);
     } else {
-      // Si no existe la sesión, limpia el campo y actualiza el usuario
-      await clearUserWhatsapp(chatId);
-      whatsappConnected = false;
-      // Reinicia el proceso para actualizar el menú y el estado global
-      setTimeout(() => process.exit(0), 500);
-      return;
+      extraButtons.push([{ text: '❌ Desconectar WhatsApp', callback_data: 'disconnect_whatsapp' }]);
     }
-  }
 
-  const expires = new Date(currentUser.expires);
-
- let extraButtons = [];
-  if (!whatsappConnected) {
-    extraButtons.push([{ text: '📱 Conectar WhatsApp', callback_data: 'start_pairing' }]);
-  } else {
-    extraButtons.push([{ text: '❌ Desconectar WhatsApp', callback_data: 'disconnect_whatsapp' }]);
-  }
-
-  function getMenuCaption(expiresDate) {
-    const now = new Date();
-    let ms = expiresDate - now;
-    if (ms < 0) ms = 0;
-    const segundos = Math.floor(ms / 1000) % 60;
-    const minutos = Math.floor(ms / 60000) % 60;
-    const horas = Math.floor(ms / 3600000) % 24;
-    const dias = Math.floor(ms / 86400000);
-    return `*📱 ZETAS-BOT V4 MENU*\n\n*TIEMPO VIP RESTANTE:* ${dias}d ${horas}h ${minutos}m ${segundos}s\n\n_Selecciona un comando para ejecutar_`;
-  }
-
-  let menuMsg = await bot.sendPhoto(chatId, path.join(__dirname, 'src', 'foto.jpg'), {
-    caption: getMenuCaption(expires),
-    parse_mode: 'Markdown',
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '📱 CRASH ANDROID', callback_data: 'exec_crashwa' }, { text: '📱 CRASH IPHONE', callback_data: 'exec_crash-ios' }],
-        [{ text: '💻 CRASH PC', callback_data: 'exec_crash-pc' }, { text: '⚡ ATRASO', callback_data: 'exec_atraso' }],
-        ...extraButtons
-      ]
-    }
-  });
-
-let interval = setInterval(() => {
-    let ms = expires - new Date();
-    if (ms <= 0) {
-      clearInterval(interval);
-      bot.editMessageCaption('⛔ Tu acceso VIP ha expirado.', { chat_id: chatId, message_id: menuMsg.message_id }).catch(() => {});
-      return;
-    }
-    bot.editMessageCaption(getMenuCaption(expires), {
-      chat_id: chatId,
-      message_id: menuMsg.message_id,
+    let menuMsg = await bot.sendPhoto(chatId, path.join(__dirname, 'src', 'foto.jpg'), {
+      caption: '*📱 ZETAS-BOT V4 MENU*\n\n_Selecciona un comando para ejecutar_',
       parse_mode: 'Markdown',
-      reply_markup: menuMsg.reply_markup
-    }).catch(() => clearInterval(interval));
-  }, 60000);
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '📱 CRASH ANDROID', callback_data: 'exec_crashwa' }, { text: '📱 CRASH IPHONE', callback_data: 'exec_crash-ios' }],
+          [{ text: '💻 CRASH PC', callback_data: 'exec_crash-pc' }, { text: '⚡ ATRASO', callback_data: 'exec_atraso' }],
+          ...extraButtons
+        ]
+      }
+    });
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 // --- CARGA LOS COMANDOS DE USUARIO DESDE chocoplus.js ---
-// Asegúrate de que solo se cargue una vez y siempre limpiando listeners
 async function loadChocoplus() {
   bot.removeAllListeners();
-  delete require.cache?.[require.resolve('./chocoplus')]; // Por compatibilidad, aunque import() no usa require.cache
-  const chocoplusModule = await import('./chocoplus.js');
-  chocoplusModule.default
-    ? chocoplusModule.default(bot, {
-        userStates,
-        activeSessions,
-        cleanSession,
-        sendUserMenu,
-        defineBuyOptions,
-        updateUserWhatsapp,
-        clearUserWhatsapp
-      })
-    : chocoplusModule(bot, {
+  
+  // Eliminar uso de require.cache y usar import dinámico
+  try {
+    const chocoplusModule = await import(`./chocoplus.js?update=${Date.now()}`);
+    if (typeof chocoplusModule.default === 'function') {
+      chocoplusModule.default(bot, {
         userStates,
         activeSessions,
         cleanSession,
@@ -236,6 +216,10 @@ async function loadChocoplus() {
         updateUserWhatsapp,
         clearUserWhatsapp
       });
+    }
+  } catch (err) {
+    console.error('Error al cargar chocoplus.js:', err);
+  }
 }
 loadChocoplus();
 

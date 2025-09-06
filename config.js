@@ -1,18 +1,20 @@
-require('dotenv').config();
+import 'dotenv/config';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import fs from 'fs';
 
-const fs = require('fs')
-const file = require.resolve(__filename)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 global.prefa = ['','!','.',',',';'] 
 
-fs.watchFile(file, () => {
-fs.unwatchFile(file)
-console.log(`Update ${__filename}`)
-delete require.cache[file]
-require(file)
+fs.watchFile(__filename, () => {
+  fs.unwatchFile(__filename)
+  console.log(`Update ${__filename}`)
 })
 
-module.exports = {
+// Exportar como objeto nombrado en lugar de default
+export const config = {
   BOT_TOKEN: process.env.BOT_TOKEN, // Debe estar definido en .env
   ADMIN_IDS: process.env.ADMIN_IDS
     ? process.env.ADMIN_IDS.split(',').map(id => Number(id.trim()))
