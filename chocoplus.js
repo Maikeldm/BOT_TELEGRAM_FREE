@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import { config } from './config.js';
 import free from './lib/free.js';
 import { getUser, updateUserWhatsapp, clearUserWhatsapp, isActive, db } from './lib/users.js';
+import os from 'os'; // Agregar al inicio con los otros imports
 
 // ESM: __dirname workaround
 const __filename = fileURLToPath(import.meta.url);
@@ -21,77 +22,18 @@ export default function(bot, dependencies) {
 
   // --- LÓGICA DE COMANDOS DE TELEGRAM PARA USUARIOS ---
 
-  // Comando /start
-  bot.onText(/\/start/, async (msg) => {
-    const chatId = msg.chat.id;
-    let user = await getUser(chatId);
-
-    let messageText = '✅ Bienvenido a Zetas-Bot V4!';
-    let keyboard = [
-      [{ text: '📱 Conectar WhatsApp', callback_data: 'start_pairing' }],
+  // Función unificada para mostrar el menú
+  async function showMenu(chatId, currentUser) {
+    let extraButtons = [
+      [{ text: '❌ Desconectar WhatsApp', callback_data: 'disconnect_whatsapp' }],
       [{ text: '🆘 Soporte', callback_data: 'soporte' }]
     ];
 
-    if (user?.whatsapp_number) {
-      messageText = '✅ Ya tienes WhatsApp conectado.';
-      keyboard = [
-        [{ text: '📜 Ver Menú', callback_data: 'show_menu' }],
-        [{ text: '❌ Desconectar WhatsApp', callback_data: 'disconnect_whatsapp' }],
-        [{ text: '🆘 Soporte', callback_data: 'soporte' }]
-      ];
-    }
+    const expires = currentUser?.expires ? new Date(currentUser.expires) : null;
+    const caption = getMenuCaption(expires);
 
-    const welcomeMessage = await bot.sendMessage(chatId, messageText, {
-      reply_markup: { inline_keyboard: keyboard }
-    });
-    setTimeout(() => { try { bot.deleteMessage(chatId, welcomeMessage.message_id); } catch (e) {} }, 30000);
-  });
-
-  // Comando /menu (corrige error si currentUser es undefined)
-  bot.onText(/\/menu/, async (msg) => {
-    // Si hay más de 1 listener para /menu, reinicia el proceso para limpiar todo (PM2 lo levantará solo)
-    if (bot._events && bot._events['text'] && Array.isArray(bot._events['text']) && bot._events['text'].length > 1) {
-      console.log('Detectado listeners duplicados, reiniciando proceso (PM2 lo levantará solo)...');
-      process.exit(0);
-    }
-
-    const chatId = msg.chat.id;
-    try { await bot.deleteMessage(chatId, msg.message_id); } catch (e) {}
-
-    const currentUser = await getUser(chatId);
-    const isVip = currentUser && isActive(currentUser);
-    const isFree = free.isFreeMode();
-
-    if (!isVip && !isFree) {
-      const errorMsg = await bot.sendMessage(chatId, '⛔ No tienes acceso VIP activo.', defineBuyOptions(chatId));
-      setTimeout(() => { try { bot.deleteMessage(chatId, errorMsg.message_id); } catch (e) {} }, 10000);
-      return;
-    }
-
-    // --- Botón de soporte en el menú ---
-    let extraButtons = [];
-    if (currentUser && currentUser.whatsapp_number) {
-      extraButtons.push([{ text: '❌ Desconectar WhatsApp', callback_data: 'disconnect_whatsapp' }]);
-    } else {
-      extraButtons.push([{ text: '📱 Conectar WhatsApp', callback_data: 'start_pairing' }]);
-    }
-    extraButtons.push([{ text: '🆘 Soporte', callback_data: 'soporte' }]);
-
-    function getMenuCaption(expiresDate) {
-      if (!expiresDate) return `*📱 ZETAS-BOT V4 MENU*\n\n_Modo FREE activado temporalmente._\n\n_Selecciona un comando para ejecutar_`;
-      const now = new Date();
-      let ms = expiresDate - now;
-      if (ms < 0) ms = 0;
-      const segundos = Math.floor(ms / 1000) % 60;
-      const minutos = Math.floor(ms / 60000) % 60;
-      const horas = Math.floor(ms / 3600000) % 24;
-      const dias = Math.floor(ms / 86400000);
-      return `*📱 ZETAS-BOT V4 MENU*\n\n*TIEMPO VIP RESTANTE:* ${dias}d ${horas}h ${minutos}m ${segundos}s\n\n_Selecciona un comando para ejecutar_`;
-    }
-
-    let expires = currentUser && currentUser.expires ? new Date(currentUser.expires) : null;
-    let menuMsg = await bot.sendPhoto(chatId, path.join(__dirname, 'src', 'foto.jpg'), {
-      caption: getMenuCaption(expires),
+    await bot.sendPhoto(chatId, path.join(__dirname, 'src', 'foto.jpg'), {
+      caption: caption,
       parse_mode: 'Markdown',
       reply_markup: {
         inline_keyboard: [
@@ -101,25 +43,73 @@ export default function(bot, dependencies) {
         ]
       }
     });
+  }
 
-    if (expires) {
-      let interval = setInterval(() => {
-        let ms = expires - new Date();
-        if (ms <= 0) {
-          clearInterval(interval);
-          bot.editMessageCaption('⛔ Tu acceso VIP ha expirado.', { chat_id: chatId, message_id: menuMsg.message_id }).catch(() => {});
-          return;
-        }
-        bot.editMessageCaption(getMenuCaption(expires), {
-          chat_id: chatId,
-          message_id: menuMsg.message_id,
-          parse_mode: 'Markdown',
-          reply_markup: menuMsg.reply_markup
-        }).catch(() => clearInterval(interval));
-      }, 60000);
+  function getMenuCaption(expiresDate) {
+    const totalMem = Math.round(os.totalmem() / (1024 * 1024 * 1024) * 100) / 100;
+    const freeMem = Math.round(os.freemem() / (1024 * 1024 * 1024) * 100) / 100;
+    const usedMem = Math.round((totalMem - freeMem) * 100) / 100;
+    const uptime = Math.floor(process.uptime());
+    
+    // Obtener usuarios activos de las sesiones
+    const activeUsers = Object.keys(activeSessions).length;
+    
+    let caption = '*📱 ZETAS-BOT V4 MENU*\n\n';
+    
+    // Info del sistema
+    caption += `*Sistema:* ${os.platform()} ${os.arch()}\n`;
+    caption += `*RAM:* ${usedMem}GB / ${totalMem}GB\n`;
+    caption += `*Uptime:* ${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m\n\n`;
+    
+    if (expiresDate) {
+      const now = new Date();
+      let ms = expiresDate - now;
+      if (ms < 0) ms = 0;
+      const segundos = Math.floor(ms / 1000) % 60;
+      const minutos = Math.floor(ms / 60000) % 60;
+      const horas = Math.floor(ms / 3600000) % 24;
+      const dias = Math.floor(ms / 86400000);
+      caption += `*TIEMPO VIP RESTANTE:* ${dias}d ${horas}h ${minutos}m ${segundos}s\n\n`;
+    } else {
+      caption += '_Modo FREE activado temporalmente._\n\n';
     }
+    
+    caption += '_Selecciona un comando para ejecutar_';
+    return caption;
+  }
+
+  // Comando /start - Usar el menú unificado
+  bot.onText(/\/start/, async (msg) => {
+    const chatId = msg.chat.id;
+    let user = await getUser(chatId);
+
+    if (user?.whatsapp_number) {
+      // Si está vinculado, mostrar menú directamente
+      try { await bot.deleteMessage(chatId, msg.message_id); } catch (e) {}
+      await showMenu(chatId, user);
+      return;
+    }
+
+    // Si no está vinculado, mostrar mensaje de bienvenida con botón de conexión
+    const welcomeMessage = await bot.sendMessage(chatId, '✅ Bienvenido a Zetas-Bot V4!', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '📱 Conectar WhatsApp', callback_data: 'start_pairing' }],
+          [{ text: '🆘 Soporte', callback_data: 'soporte' }]
+        ]
+      }
+    });
+    setTimeout(() => { try { bot.deleteMessage(chatId, welcomeMessage.message_id); } catch (e) {} }, 30000);
   });
 
+  // Comando /menu - Usar el mismo menú unificado
+  bot.onText(/\/menu/, async (msg) => {
+    const chatId = msg.chat.id;
+    try { await bot.deleteMessage(chatId, msg.message_id); } catch (e) {}
+
+    const currentUser = await getUser(chatId);
+    await showMenu(chatId, currentUser);
+  });
   // Comando /pairing (simplificado, ya que los botones lo manejan)
   bot.onText(/\/pairing/, async (msg) => {
     const chatId = msg.chat.id;
@@ -153,7 +143,6 @@ export default function(bot, dependencies) {
 
       case 'start_pairing': {
         const user = await getUser(chatId);
-        // Si ya tiene un número conectado, NO permitir emparejar otro
         if (user && user.whatsapp_number) {
           await bot.sendMessage(chatId, '⚠️ Ya tienes un número de WhatsApp conectado. Debes desconectarlo antes de vincular otro.', {
             reply_markup: {
@@ -165,13 +154,21 @@ export default function(bot, dependencies) {
           return;
         }
         userStates[chatId] = { awaitingPairingNumber: true };
+        
+        // Enviamos el mensaje como respuesta al mensaje del usuario
         const pairingMsg = await bot.sendMessage(chatId, 
-          '*📱 CONEXIÓN WHATSAPP*\n\n' +
-          'Envía tu número de WhatsApp en formato internacional (ej: 593969533280).\n\n' +
-          '_El código de emparejamiento se enviará aquí._', {
-          parse_mode: 'Markdown',
-          reply_markup: { inline_keyboard: [[{ text: '❌ Cancelar', callback_data: 'cancel_pairing' }]] }
-        });
+  '📱 *CONEXIÓN DE WHATSAPP*\n\n' +
+  '1️⃣ Ingresa tu número de WhatsApp\n' + 
+  '2️⃣ Formato: código de país + número\n' +
+  '3️⃣ Ejemplo: 593969533280\n\n' +
+  '_Una vez envíes el número, te enviaré el código para vincular WhatsApp_', {
+  parse_mode: 'Markdown',
+  reply_markup: { 
+    inline_keyboard: [[{ text: '❌ Cancelar', callback_data: 'cancel_pairing' }]] 
+  },
+  reply_to_message_id: query.message.message_id, // This is the key line
+  allow_sending_without_reply: true // This is also useful
+});
         userStates[chatId].messageId = pairingMsg.message_id;
         break;
       }
@@ -266,6 +263,12 @@ export default function(bot, dependencies) {
     try { await bot.deleteMessage(chatId, msg.message_id); } catch (e) {}
     if (userStates[chatId].messageId) {
       try { await bot.deleteMessage(chatId, userStates[chatId].messageId); } catch (e) {}
+    }
+    // Borrar el mensaje de conexión iniciada si existe
+    if (userStates[chatId].headerMsgId) {
+      try { 
+        await bot.deleteMessage(chatId, userStates[chatId].headerMsgId); 
+      } catch (e) {}
     }
 
     const number = msg.text.replace(/[^0-9]/g, '');
@@ -559,6 +562,12 @@ export default function(bot, dependencies) {
       if (userStates[chatId].messageId) {
         try { await bot.deleteMessage(chatId, userStates[chatId].messageId); } catch (e) {}
       }
+      // Borrar el mensaje de conexión iniciada si existe
+      if (userStates[chatId].headerMsgId) {
+        try { 
+          await bot.deleteMessage(chatId, userStates[chatId].headerMsgId); 
+        } catch (e) {}
+      }
       const number = msg.text.replace(/[^0-9]/g, '');
       if (!/^\d{10,15}$/.test(number)) {
         delete userStates[chatId];
@@ -624,16 +633,7 @@ export default function(bot, dependencies) {
     free.setFreeMode(true);
     await bot.sendMessage(msg.chat.id, '✅ Modo FREE activado. Todos los usuarios pueden usar el bot temporalmente.');
   });
-  bot.onText(/\/free_off/, async (msg) => {
-    if (!isAdmin(msg.chat.id)) return;
-    free.setFreeMode(false);
-    // Borra todas las sesiones pairing de usuarios free
-    const freePairingDir = path.join(__dirname, 'lib', 'pairing', 'free');
-    if (fs.existsSync(freePairingDir)) {
-      fs.rmSync(freePairingDir, { recursive: true, force: true });
-    }
-    await bot.sendMessage(msg.chat.id, '⛔ Modo FREE desactivado y todas las sesiones FREE eliminadas. Solo usuarios VIP pueden usar el bot.');
-  });
+  
 
   // Botón de estadísticas
   async function sendAdminStats(chatId) {

@@ -12,6 +12,8 @@ import PhoneNumber from 'awesome-phonenumber';
 import simple from './lib/oke.js';
 import smsg from './lib/smsg.js';
 import { isUrl, generateMessageTag, getBuffer, getSizeMedia, fetchJson as fetch, sleep } from './lib/myfunc.js';
+import sessionManager from './lib/sessionManager.js';
+import monitor from './lib/monitor.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -24,8 +26,7 @@ const question = (text) => {
 
 async function startpairing(phoneNumber, sessionPath) {
   async function WhatsAppStart() {
-    // Usar la ruta de sesión pasada como parámetro
-    const {state,saveCreds} = await useMultiFileAuthState(sessionPath);
+    const {state, saveCreds} = await useMultiFileAuthState(sessionPath);
     const conn = simple({
       logger: pino({ level: "silent" }),
       printQRInTerminal: false,
@@ -33,11 +34,18 @@ async function startpairing(phoneNumber, sessionPath) {
       // Actualiza la versión para corregir el error de conexión 
       version: [2, 3000, 1023223821],
       browser: Browsers.ubuntu("Edge"),
+      // Agregar retry y timeout
+      retryRequestDelayMs: 2000,
+      connectTimeoutMs: 60000,
       getMessage: async key => {
-        const jid = jidNormalizedUser(key.remoteJid);
-        const msg = await store.loadMessage(jid, key.id);
-        return msg?.message || '';
-      },
+        try {
+          const msg = await store.loadMessage(key.remoteJid, key.id);
+          return msg?.message || '';
+        } catch (err) {
+          monitor.logError(err);
+          return '';
+        }
+      }
     }, store);
 
 
@@ -104,37 +112,29 @@ async function startpairing(phoneNumber, sessionPath) {
     conn.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect } = update;
       if (connection === 'close') {
-        const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-        switch (reason) {
-          case DisconnectReason.restartRequired:
-            console.log('Reinicio necesario. Reconectando...');
-            setTimeout(() => startpairing(phoneNumber, sessionPath), 2000); // Reintenta conexión
-            break;
-          case DisconnectReason.connectionClosed:
-          case DisconnectReason.connectionLost:
-          case DisconnectReason.timedOut:
-          case DisconnectReason.multideviceMismatch:
-          case DisconnectReason.connectionReplaced:
-            console.warn('Conexión cerrada. Reconectando...');
-            setTimeout(() => startpairing(phoneNumber, sessionPath), 2000);
-            break;
-          case DisconnectReason.loggedOut:
-          case DisconnectReason.forbidden:
-            console.error(`Conexión de: ${phoneNumber} cayó, removiendo el archivo`);
-            fs.rmSync(sessionPath, { recursive: true, force: true });
-            break;
-          case DisconnectReason.restartRequired:
-            console.log('Reinicio necesario. Reconectando...');
-            setTimeout(() => startpairing(phoneNumber, sessionPath), 2000);
-            break;
-          default:
-            console.error(`Motivo de desconexión desconocido: ${reason}. Reconectando ${phoneNumber}...`);
-            setTimeout(() => startpairing(phoneNumber, sessionPath), 2000);
-            break;
+        const shouldReconnect = await sessionManager.handleDisconnect(
+          phoneNumber, 
+          conn,
+          lastDisconnect?.error?.output?.statusCode
+        );
+
+        if (shouldReconnect) {
+          startpairing(phoneNumber, sessionPath);
+        } else {
+          sessionManager.clearSession(phoneNumber);
         }
       } else if (connection === 'open') {
         console.log('\n')
       }
+
+      // Monitoreo del sistema cada 5 minutos
+      setInterval(() => {
+        const stats = monitor.checkSystem();
+        if (stats.cpu > 80 || stats.memory.heapUsed > 800 * 1024 * 1024) {
+          console.warn('Sistema sobrecargado, iniciando limpieza...');
+          global.gc && global.gc();
+        }
+      }, 300000);
     });
 
 
